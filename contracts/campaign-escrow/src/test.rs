@@ -509,13 +509,15 @@ mod test_happy_path {
         let campaign = client.get_campaign(&id);
         assert_eq!(campaign.status, ads_bazaar_shared::CampaignStatus::Active);
 
-        // Dispute functions should still work
-        // It requires freeze_for_dispute which is available in lib.rs, but we need to check if it's exposed in the client.
-        // It should be automatically exposed by soroban_sdk contractimpl.
+        // Dispute functions should still work.
         client.freeze_for_dispute(&admin, &id, &creator);
 
         let app = client.get_application(&id, &creator);
         assert!(app.frozen);
+
+        // resolve_dispute requires the evidence window to have elapsed
+        // since the freeze (see MIN_EVIDENCE_WINDOW).
+        advance_time(&env, crate::MIN_EVIDENCE_WINDOW);
 
         client.resolve_dispute(&admin, &id, &creator, &crate::DisputeResolution::PayCreator);
 

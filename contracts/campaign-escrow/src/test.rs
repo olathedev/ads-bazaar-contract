@@ -488,6 +488,42 @@ mod test_happy_path {
     }
 
     #[test]
+    fn reclaim_surplus_with_committed_payouts_leaves_campaign_active() {
+        let (env, contract_id) = setup_env();
+        let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 0);
+        let token_client = TokenClient::new(&env, &token);
+
+        let payout: i128 = 1_000_000;
+        let budget: i128 = payout * 5;
+        let id = create_funded_campaign(&env, &client, &business, &token, budget, 5);
+
+        let creator = Address::generate(&env);
+        // Apply and get selected, but not paid
+        client.apply_to_campaign(&creator, &id, &soroban_sdk::String::from_str(&env, "pitch"));
+        client.approve_creator(&business, &id, &creator, &payout);
+
+        // Business reclaims surplus
+        client.reclaim_surplus(&business, &id);
+
+        // Status should be Active (not Completed) because committed payouts remain
+        let campaign = client.get_campaign(&id);
+        assert_eq!(campaign.status, ads_bazaar_shared::CampaignStatus::Active);
+
+        // Dispute functions should still work
+        // It requires freeze_for_dispute which is available in lib.rs, but we need to check if it's exposed in the client.
+        // It should be automatically exposed by soroban_sdk contractimpl.
+        client.freeze_for_dispute(&admin, &id, &creator);
+
+        let app = client.get_application(&id, &creator);
+        assert!(app.frozen);
+
+        client.resolve_dispute(&admin, &id, &creator, &crate::DisputeResolution::PayCreator);
+
+        // Payout should have reached creator
+        assert_eq!(token_client.balance(&creator), payout);
+    }
+
+    #[test]
     fn emergency_recover_sweeps_unallocated_to_treasury() {
         let (env, contract_id) = setup_env();
         let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);

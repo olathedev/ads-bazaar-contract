@@ -741,7 +741,7 @@ impl CampaignEscrowContract {
         // Leave `committed_payouts` intact so approved-but-unpaid creators can
         // still claim their payouts afterward.
         campaign.escrow_balance = campaign.committed_payouts;
-        if campaign.status != CampaignStatus::Completed {
+        if campaign.escrow_balance == 0 {
             campaign.status = CampaignStatus::Completed;
         }
         storage::set_campaign(&env, &campaign);

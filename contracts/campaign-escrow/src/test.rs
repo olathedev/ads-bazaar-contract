@@ -1579,15 +1579,34 @@ mod test_update_metadata {
 
 mod test_resolve_dispute {
     use super::test_helpers::*;
-    use crate::{DisputeResolution, Error};
+    use crate::{CampaignEscrowContractClient, DisputeResolution, Error, MIN_EVIDENCE_WINDOW};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::token::Client as TokenClient;
     use soroban_sdk::Address;
 
+    /// Open a dispute over `creator`'s payout and let the evidence window run
+    /// all the way out, leaving `resolve_dispute` callable. Mirrors the real
+    /// flow: a freeze (from `raise_dispute` or from admin directly) starts
+    /// the clock, and settlement only unlocks `MIN_EVIDENCE_WINDOW` later.
+    ///
+    /// Advances by exactly the window, so every test built on this also
+    /// pins the inclusive boundary — resolution is legal the instant the
+    /// window closes, not a second after.
+    fn open_dispute_and_wait_out_window(
+        env: &soroban_sdk::Env,
+        client: &CampaignEscrowContractClient,
+        dispute: &Address,
+        campaign_id: u64,
+        creator: &Address,
+    ) {
+        client.freeze_for_dispute(dispute, &campaign_id, creator);
+        advance_time(env, MIN_EVIDENCE_WINDOW);
+    }
+
     #[test]
     fn pay_creator_resolution_pays_creator_minus_fee() {
         let (env, contract_id) = setup_env();
-        let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
         let token_client = TokenClient::new(&env, &token);
 
         let payout: i128 = 1_000_000;
@@ -1595,6 +1614,7 @@ mod test_resolve_dispute {
         let creator = Address::generate(&env);
         client.apply_to_campaign(&creator, &id, &soroban_sdk::String::from_str(&env, "pitch"));
         client.approve_creator(&business, &id, &creator, &payout);
+        open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);
 
         let creator_before = token_client.balance(&creator);
         let business_before = token_client.balance(&business);
@@ -1622,7 +1642,7 @@ mod test_resolve_dispute {
     #[test]
     fn refund_business_resolution_returns_full_amount_no_fee() {
         let (env, contract_id) = setup_env();
-        let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
         let token_client = TokenClient::new(&env, &token);
 
         let payout: i128 = 1_000_000;
@@ -1630,6 +1650,7 @@ mod test_resolve_dispute {
         let creator = Address::generate(&env);
         client.apply_to_campaign(&creator, &id, &soroban_sdk::String::from_str(&env, "pitch"));
         client.approve_creator(&business, &id, &creator, &payout);
+        open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);
 
         let business_before = token_client.balance(&business);
         let creator_before = token_client.balance(&creator);
@@ -1646,7 +1667,7 @@ mod test_resolve_dispute {
     #[test]
     fn split_resolution_divides_correctly() {
         let (env, contract_id) = setup_env();
-        let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
         let token_client = TokenClient::new(&env, &token);
 
         let payout: i128 = 1_000_000;
@@ -1654,6 +1675,7 @@ mod test_resolve_dispute {
         let creator = Address::generate(&env);
         client.apply_to_campaign(&creator, &id, &soroban_sdk::String::from_str(&env, "pitch"));
         client.approve_creator(&business, &id, &creator, &payout);
+        open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);
 
         let business_before = token_client.balance(&business);
         let creator_before = token_client.balance(&creator);
@@ -1676,13 +1698,16 @@ mod test_resolve_dispute {
     #[test]
     fn non_admin_cannot_resolve_dispute() {
         let (env, contract_id) = setup_env();
-        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let (client, _admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
 
         let payout: i128 = 1_000_000;
         let id = create_funded_campaign(&env, &client, &business, &token, payout, 5);
         let creator = Address::generate(&env);
         client.apply_to_campaign(&creator, &id, &soroban_sdk::String::from_str(&env, "pitch"));
         client.approve_creator(&business, &id, &creator, &payout);
+        // Fully resolvable for the admin, so the only thing this test's
+        // caller fails on is authorization.
+        open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);
 
         let stranger = Address::generate(&env);
         let result =
@@ -1722,7 +1747,7 @@ mod test_resolve_dispute {
     #[test]
     fn resolve_dispute_works_on_rejected_application() {
         let (env, contract_id) = setup_env();
-        let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
         let token_client = TokenClient::new(&env, &token);
 
         let payout: i128 = 1_000_000;
@@ -1733,6 +1758,7 @@ mod test_resolve_dispute {
         client.submit_proof(&creator, &id, &soroban_sdk::String::from_str(&env, "proof"));
         // Business rejects — a natural point of disagreement to escalate.
         client.reject_submission(&business, &id, &creator);
+        open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);
 
         let creator_before = token_client.balance(&creator);
         client.resolve_dispute(&admin, &id, &creator, &DisputeResolution::PayCreator);
@@ -1742,6 +1768,146 @@ mod test_resolve_dispute {
             token_client.balance(&creator),
             creator_before + payout - fee
         );
+    }
+
+    // ── Evidence window ───────────────────────────────────────────────────
+
+    /// Take a creator to an approved, proof-submitted application and open a
+    /// dispute over their payout, leaving the evidence window still running.
+    fn creator_with_open_dispute(
+        env: &soroban_sdk::Env,
+        client: &CampaignEscrowContractClient,
+        dispute: &Address,
+        business: &Address,
+        campaign_id: u64,
+        payout: i128,
+    ) -> Address {
+        let creator = Address::generate(env);
+        client.apply_to_campaign(
+            &creator,
+            &campaign_id,
+            &soroban_sdk::String::from_str(env, "pitch"),
+        );
+        client.approve_creator(business, &campaign_id, &creator, &payout);
+        client.submit_proof(
+            &creator,
+            &campaign_id,
+            &soroban_sdk::String::from_str(env, "proof"),
+        );
+        client.freeze_for_dispute(dispute, &campaign_id, &creator);
+        creator
+    }
+
+    /// The core of this guard: the admin cannot reallocate a contested payout
+    /// in the same breath as the dispute being opened.
+    #[test]
+    fn resolve_dispute_rejected_immediately_after_dispute_opened() {
+        let (env, contract_id) = setup_env();
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let token_client = TokenClient::new(&env, &token);
+
+        let payout: i128 = 1_000_000;
+        let id = create_funded_campaign(&env, &client, &business, &token, payout, 5);
+        let creator = creator_with_open_dispute(&env, &client, &dispute, &business, id, payout);
+
+        let creator_before = token_client.balance(&creator);
+        let escrow_before = token_client.balance(&contract_id);
+
+        let result =
+            client.try_resolve_dispute(&admin, &id, &creator, &DisputeResolution::PayCreator);
+        assert_eq!(result, Err(Ok(Error::EvidenceWindowOpen)));
+
+        // Rejected means rejected: no funds moved and nothing settled.
+        assert_eq!(token_client.balance(&creator), creator_before);
+        assert_eq!(token_client.balance(&contract_id), escrow_before);
+        let application = client.get_application(&id, &creator);
+        assert!(application.frozen);
+        assert_ne!(
+            application.status,
+            ads_bazaar_shared::ApplicationStatus::Paid
+        );
+        assert_eq!(payout, application.payout_amount);
+    }
+
+    /// One second short of the window is still inside it. Pins the boundary
+    /// from below, so an off-by-one in the comparison can't pass unnoticed.
+    #[test]
+    fn resolve_dispute_rejected_one_second_before_window_closes() {
+        let (env, contract_id) = setup_env();
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
+
+        let payout: i128 = 1_000_000;
+        let id = create_funded_campaign(&env, &client, &business, &token, payout, 5);
+        let creator = creator_with_open_dispute(&env, &client, &dispute, &business, id, payout);
+
+        advance_time(&env, MIN_EVIDENCE_WINDOW - 1);
+        let result =
+            client.try_resolve_dispute(&admin, &id, &creator, &DisputeResolution::PayCreator);
+        assert_eq!(result, Err(Ok(Error::EvidenceWindowOpen)));
+    }
+
+    /// The window is a delay, not a veto — once it closes, resolution goes
+    /// through and pays out exactly as it would have without the gate.
+    #[test]
+    fn resolve_dispute_succeeds_once_evidence_window_elapses() {
+        let (env, contract_id) = setup_env();
+        let (client, admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let token_client = TokenClient::new(&env, &token);
+
+        let payout: i128 = 1_000_000;
+        let id = create_funded_campaign(&env, &client, &business, &token, payout, 5);
+        let creator = creator_with_open_dispute(&env, &client, &dispute, &business, id, payout);
+
+        let creator_before = token_client.balance(&creator);
+        // Exactly the window, no more: resolution unlocks the instant it closes.
+        advance_time(&env, MIN_EVIDENCE_WINDOW);
+        client.resolve_dispute(&admin, &id, &creator, &DisputeResolution::PayCreator);
+
+        let fee = payout * 50 / ads_bazaar_shared::BASIS_POINTS_DENOMINATOR;
+        assert_eq!(
+            token_client.balance(&creator),
+            creator_before + payout - fee
+        );
+
+        let application = client.get_application(&id, &creator);
+        assert_eq!(
+            application.status,
+            ads_bazaar_shared::ApplicationStatus::Paid
+        );
+        // Settling clears the dispute state, so the window is not re-armed
+        // against a payout that no longer has anything left to contest.
+        assert!(!application.frozen);
+        assert_eq!(application.dispute_opened_at, None);
+    }
+
+    /// Without a `freeze_for_dispute` there is no dispute and no window to
+    /// measure from, so the admin has nothing to settle — this is the half of
+    /// the gap the timestamp alone wouldn't close.
+    #[test]
+    fn resolve_dispute_rejects_application_with_no_dispute_open() {
+        let (env, contract_id) = setup_env();
+        let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+
+        let payout: i128 = 1_000_000;
+        let id = create_funded_campaign(&env, &client, &business, &token, payout, 5);
+        let creator = Address::generate(&env);
+        client.apply_to_campaign(&creator, &id, &soroban_sdk::String::from_str(&env, "pitch"));
+        client.approve_creator(&business, &id, &creator, &payout);
+
+        assert_eq!(
+            client.get_application(&id, &creator).dispute_opened_at,
+            None
+        );
+        let result =
+            client.try_resolve_dispute(&admin, &id, &creator, &DisputeResolution::PayCreator);
+        assert_eq!(result, Err(Ok(Error::NoDisputeOpen)));
+
+        // Still not resolvable however long the admin waits — waiting is not
+        // a substitute for a dispute actually having been raised.
+        advance_time(&env, MIN_EVIDENCE_WINDOW * 10);
+        let result =
+            client.try_resolve_dispute(&admin, &id, &creator, &DisputeResolution::PayCreator);
+        assert_eq!(result, Err(Ok(Error::NoDisputeOpen)));
     }
 }
 
@@ -1775,12 +1941,46 @@ mod test_freeze_for_dispute {
         let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
         let creator = payable_application(&env, &client, &business, id, 1_000_000);
 
-        assert!(!client.get_application(&id, &creator).frozen);
+        let before = client.get_application(&id, &creator);
+        assert!(!before.frozen);
+        assert_eq!(before.dispute_opened_at, None);
+
+        advance_time(&env, 1_234);
         client.freeze_for_dispute(&dispute, &id, &creator);
-        assert!(client.get_application(&id, &creator).frozen);
+
+        let after = client.get_application(&id, &creator);
+        assert!(after.frozen);
+        // The freeze stamps the moment the dispute opened — that stamp is
+        // what `resolve_dispute` measures `MIN_EVIDENCE_WINDOW` from.
+        assert_eq!(after.dispute_opened_at, Some(BASE_TIME + 1_234));
 
         let result = client.try_claim_payment(&creator, &id);
         assert_eq!(result, Err(Ok(Error::PayoutFrozen)));
+    }
+
+    /// A second freeze is already rejected, so an admin cannot use one to
+    /// push `dispute_opened_at` forward and restart the evidence window on a
+    /// dispute the other party is midway through answering.
+    #[test]
+    fn re_freeze_cannot_restart_the_evidence_window() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+        let creator = payable_application(&env, &client, &business, id, 1_000_000);
+
+        client.freeze_for_dispute(&dispute, &id, &creator);
+        let opened_at = client.get_application(&id, &creator).dispute_opened_at;
+        assert_eq!(opened_at, Some(BASE_TIME));
+
+        advance_time(&env, crate::MIN_EVIDENCE_WINDOW / 2);
+        assert_eq!(
+            client.try_freeze_for_dispute(&dispute, &id, &creator),
+            Err(Ok(Error::PayoutFrozen))
+        );
+        assert_eq!(
+            client.get_application(&id, &creator).dispute_opened_at,
+            opened_at
+        );
     }
 
     #[test]
@@ -1947,6 +2147,7 @@ mod test_freeze_for_dispute {
         let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
         let creator = payable_application(&env, &client, &business, id, 1_000_000);
         client.freeze_for_dispute(&dispute, &id, &creator);
+        advance_time(&env, crate::MIN_EVIDENCE_WINDOW);
 
         client.resolve_dispute(&admin, &id, &creator, &crate::DisputeResolution::PayCreator);
 

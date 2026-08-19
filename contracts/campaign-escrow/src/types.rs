@@ -52,6 +52,16 @@ pub struct Application {
     /// the same campaign. Cleared by `resolve_dispute` (and, eventually,
     /// `resolve_dispute_payout`) once the application settles.
     pub frozen: bool,
+    /// Ledger timestamp (unix seconds) at which the dispute over this
+    /// application was opened by `freeze_for_dispute`, or `None` if no
+    /// dispute is open. Written in the same storage entry as `frozen` so the
+    /// two can never drift apart.
+    ///
+    /// This is what `resolve_dispute` measures `MIN_EVIDENCE_WINDOW` from:
+    /// the admin cannot settle a contested payout until the other party has
+    /// had that long to respond. Exposed via `get_application` so a frontend
+    /// can show when resolution becomes possible.
+    pub dispute_opened_at: Option<u64>,
     pub status: ApplicationStatus,
 }
 

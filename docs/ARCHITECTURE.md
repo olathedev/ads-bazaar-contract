@@ -33,6 +33,24 @@ types instead of drifting apart.
   per-application freeze wired up by `raise_dispute`); `resolve_dispute_payout`
   is still `todo!()`.
 
+### The evidence window
+
+`freeze_for_dispute` is the point at which escrow learns a dispute exists: it
+stamps `Application::dispute_opened_at` and emits `DisputeFrozen`. The
+admin-resolved shortcut `campaign-escrow::resolve_dispute` will not settle an
+application that has no such stamp, and will not settle one until
+`MIN_EVIDENCE_WINDOW` (72h) has elapsed since it.
+
+This is a deliberate trust-minimization bound on the admin key rather than an
+implementation detail. `resolve_dispute` can move a committed payout in any
+direction, so without the window a compromised admin key could reallocate a
+disputed payout in the same block the dispute is raised — before the other
+party could answer it, or even see it. Requiring the freeze first is what
+makes the window meaningful: it guarantees a public `DisputeFrozen` event
+precedes every settlement, so there is something for the counterparty to
+notice. The constant is `pub` so a frontend can render the countdown instead
+of duplicating the number.
+
 ## Multi-currency design
 
 A campaign is funded in whatever Stellar asset the business already holds —

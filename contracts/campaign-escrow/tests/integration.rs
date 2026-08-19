@@ -28,6 +28,12 @@
 //! | 13 | Raise on already-paid payout rejected | no dispute record created |
 //! | 14 | Raise in auto-approval window still blocks claim | PayoutFrozen |
 //! | 15 | Two creators on same campaign can have independent disputes | separate dispute ids |
+//! | 16 | raise → immediate admin resolve rejected | EvidenceWindowOpen; no funds moved |
+//!
+//! Note that tests 6–8 advance the ledger past `MIN_EVIDENCE_WINDOW` before
+//! resolving. That is the real flow, not test scaffolding: a dispute raised
+//! through `raise_dispute` is not admin-resolvable until the window closes
+//! (test 16).
 //!
 //! ## What is NOT tested here (pending implementations)
 //!
@@ -39,7 +45,9 @@
 //! arbiter-resolved path so `raise → assign → resolve → payout` has
 //! balance-level coverage.
 
-use ads_bazaar_campaign_escrow::{CampaignEscrowContract, Error as EscrowError};
+use ads_bazaar_campaign_escrow::{
+    CampaignEscrowContract, Error as EscrowError, MIN_EVIDENCE_WINDOW,
+};
 use ads_bazaar_dispute_resolution::DisputeResolutionContract;
 use ads_bazaar_shared::{ApplicationStatus, DisputeOutcome, DisputeStatus, PayoutAsset};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
@@ -155,6 +163,14 @@ impl Fixture {
 
     fn token_client(&self) -> soroban_sdk::token::Client<'_> {
         soroban_sdk::token::Client::new(&self.env, &self.token)
+    }
+
+    /// Advance past the escrow's evidence window, so a dispute raised now
+    /// becomes resolvable by `resolve_dispute`.
+    fn wait_out_evidence_window(&self) {
+        self.env
+            .ledger()
+            .with_mut(|l| l.timestamp += MIN_EVIDENCE_WINDOW);
     }
 }
 
@@ -276,6 +292,7 @@ fn raise_then_admin_resolve_pay_creator_correct_balances() {
         &String::from_str(&f.env, "ipfs://evidence"),
     );
     assert!(f.escrow().get_application(&campaign_id, &creator).frozen);
+    f.wait_out_evidence_window();
 
     let tc = f.token_client();
     let creator_before = tc.balance(&creator);
@@ -315,6 +332,7 @@ fn raise_then_admin_resolve_refund_business_correct_balances() {
         &creator,
         &String::from_str(&f.env, "ipfs://work-not-delivered"),
     );
+    f.wait_out_evidence_window();
 
     let tc = f.token_client();
     let business_before = tc.balance(&f.business);
@@ -350,6 +368,7 @@ fn raise_then_admin_resolve_split_distributes_proportionally() {
         &creator,
         &String::from_str(&f.env, "ipfs://partial-delivery"),
     );
+    f.wait_out_evidence_window();
 
     let tc = f.token_client();
     let creator_before = tc.balance(&creator);
@@ -532,4 +551,64 @@ fn two_creators_on_same_campaign_can_each_be_disputed_independently() {
     assert_eq!(f.disputes().get_dispute(&id_b).creator, creator_b);
     assert!(f.escrow().get_application(&campaign_id, &creator_a).frozen);
     assert!(f.escrow().get_application(&campaign_id, &creator_b).frozen);
+}
+
+// ── 16. Evidence window blocks an instant admin resolve after raise ───────────
+
+/// A dispute raised through the real cross-contract path cannot be settled by
+/// the admin in the same breath — the party that did *not* raise it gets
+/// `MIN_EVIDENCE_WINDOW` to answer first.
+#[test]
+fn admin_cannot_resolve_dispute_immediately_after_cross_contract_raise() {
+    let f = Fixture::setup();
+    let campaign_id = f.create_funded_campaign();
+    let creator = f.add_creator_with_proof(campaign_id);
+
+    f.disputes().raise_dispute(
+        &creator,
+        &campaign_id,
+        &creator,
+        &String::from_str(&f.env, "ipfs://evidence"),
+    );
+
+    // The cross-contract freeze started the clock at the raise.
+    let app = f.escrow().get_application(&campaign_id, &creator);
+    assert_eq!(app.dispute_opened_at, Some(BASE_TIME));
+
+    let tc = f.token_client();
+    let creator_before = tc.balance(&creator);
+    let business_before = tc.balance(&f.business);
+    let escrow_before = tc.balance(&f.escrow_id);
+
+    assert_eq!(
+        f.escrow().try_resolve_dispute(
+            &f.admin,
+            &campaign_id,
+            &creator,
+            &ads_bazaar_campaign_escrow::DisputeResolution::PayCreator,
+        ),
+        Err(Ok(EscrowError::EvidenceWindowOpen))
+    );
+
+    // Nothing moved, and the payout is still frozen and contested.
+    assert_eq!(tc.balance(&creator), creator_before);
+    assert_eq!(tc.balance(&f.business), business_before);
+    assert_eq!(tc.balance(&f.escrow_id), escrow_before);
+    let app = f.escrow().get_application(&campaign_id, &creator);
+    assert!(app.frozen);
+    assert_eq!(app.status, ApplicationStatus::ProofSubmitted);
+
+    // Once the window closes the same call goes through — this is a delay,
+    // not a permanent block on the admin path.
+    f.wait_out_evidence_window();
+    f.escrow().resolve_dispute(
+        &f.admin,
+        &campaign_id,
+        &creator,
+        &ads_bazaar_campaign_escrow::DisputeResolution::PayCreator,
+    );
+    assert_eq!(
+        f.escrow().get_application(&campaign_id, &creator).status,
+        ApplicationStatus::Paid
+    );
 }

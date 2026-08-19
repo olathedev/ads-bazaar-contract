@@ -48,4 +48,13 @@ pub enum Error {
     /// The application is frozen pending dispute arbitration, so it can
     /// neither be paid out nor have its proof state changed.
     PayoutFrozen = 25,
+    /// `resolve_dispute` was called before `MIN_EVIDENCE_WINDOW` had elapsed
+    /// since the dispute was opened by `freeze_for_dispute`. The other party
+    /// still has time to submit counter-evidence.
+    EvidenceWindowOpen = 26,
+    /// `resolve_dispute` was called on an application that has no open
+    /// dispute — nothing has been frozen for it via `freeze_for_dispute`, so
+    /// there is no contested payout to settle and no evidence window to
+    /// measure from.
+    NoDisputeOpen = 27,
 }

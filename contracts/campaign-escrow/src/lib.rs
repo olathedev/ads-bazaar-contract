@@ -493,6 +493,9 @@ impl CampaignEscrowContract {
         if campaign.business != business {
             return Err(Error::NotCampaignOwner);
         }
+        if env.ledger().timestamp() > campaign.completion_deadline {
+            return Err(Error::ContentDeadlinePassed);
+        }
 
         let mut application = storage::get_application(&env, campaign_id, &creator)?;
         require_not_frozen(&application)?;

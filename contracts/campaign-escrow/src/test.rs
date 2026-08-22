@@ -873,6 +873,28 @@ mod test_deadline_enforcement {
     }
 
     #[test]
+    fn reject_after_content_deadline_cannot_defeat_auto_approval() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+
+        let creator = Address::generate(&env);
+        client.apply_to_campaign(&creator, &id, &String::from_str(&env, "pitch"));
+        client.approve_creator(&business, &id, &creator, &1_000_000);
+        client.submit_proof(&creator, &id, &String::from_str(&env, "proof"));
+
+        // Move past the content deadline: the submission is now auto-approved.
+        advance_time(&env, 604_800 + 10);
+
+        let result = client.try_reject_submission(&business, &id, &creator);
+        assert_eq!(result, Err(Ok(Error::ContentDeadlinePassed)));
+
+        // Auto-approval still lets the creator claim.
+        let result = client.try_claim_payment(&creator, &id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn create_with_past_deadline() {
         let (env, contract_id) = setup_env();
         let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);

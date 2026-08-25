@@ -21,7 +21,7 @@ pub use error::Error;
 pub use types::{Application, Campaign, DisputeResolution, ProtocolConfig};
 
 use ads_bazaar_shared::{ApplicationStatus, CampaignId, CampaignStatus, PayoutAsset};
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Symbol};
 
 /// Version string stored at `initialize` time. `upgrade` swaps the WASM
 /// binary but does not bump this on its own — see the TODO on `upgrade`
@@ -257,6 +257,22 @@ impl CampaignEscrowContract {
         }
 
         business.require_auth();
+
+        // Probe the token address with a cheap read-only cross-contract call
+        // (`decimals`) before storing anything. Returns Err on non-contract
+        // address, missing SEP-41 entrypoint, or any host-level failure —
+        // all mapped to Error::InvalidAsset so creation fails early with a
+        // clear error instead of silently deferring failure to fund_campaign
+        // after creators have already applied and done work.
+        let decimals_sym = Symbol::new(&env, "decimals");
+        let probe_result = env.try_invoke_contract::<u32, Error>(
+            &asset.token,
+            &decimals_sym,
+            vec![&env],
+        );
+        if probe_result.is_err() {
+            return Err(Error::InvalidAsset);
+        }
 
         let id = storage::next_campaign_id(&env);
         let campaign = Campaign {

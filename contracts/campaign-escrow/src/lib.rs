@@ -380,7 +380,8 @@ impl CampaignEscrowContract {
 
     /// Business approves a pending application, selecting the creator and
     /// setting their agreed `payout_amount`. Guards against selecting more
-    /// than `max_creators`, double-selection, and over-committing escrow.
+    /// than `max_creators`, double-selection, over-committing escrow, and
+    /// approvals made after the `completion_deadline` has passed.
     pub fn approve_creator(
         env: Env,
         business: Address,
@@ -399,6 +400,9 @@ impl CampaignEscrowContract {
         }
         if payout_amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+        if env.ledger().timestamp() > campaign.completion_deadline {
+            return Err(Error::ContentDeadlinePassed);
         }
 
         let mut application = storage::get_application(&env, campaign_id, &creator)?;

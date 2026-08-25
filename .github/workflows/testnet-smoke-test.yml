@@ -1,0 +1,124 @@
+name: Testnet Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_fresh:
+        description: "Deploy fresh contracts (vs. using existing from .env.testnet)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  smoke-test:
+    name: Run E2E Smoke Test on Testnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: |
+          curl -s https://install.stellar.org | bash
+          export PATH="/root/.local/bin:$PATH"
+          stellar version
+
+      - name: Generate test environment
+        run: |
+          export PATH="/root/.local/bin:$PATH"
+          
+          # Generate fresh deployer and admin accounts via named key aliases so
+          # secrets can be retrieved cleanly after generation.
+          ts=$(date +%s)
+          echo "Generating deployer account..."
+          stellar keys generate "ci-deployer-${ts}" --network testnet --fund
+          DEPLOYER_SECRET=$(stellar keys secret "ci-deployer-${ts}")
+          DEPLOYER_ADDRESS=$(stellar keys address "ci-deployer-${ts}")
+          echo "Deployer: $DEPLOYER_ADDRESS"
+
+          echo "Generating admin account..."
+          stellar keys generate "ci-admin-${ts}" --network testnet --fund
+          ADMIN_SECRET=$(stellar keys secret "ci-admin-${ts}")
+          ADMIN_ADDRESS=$(stellar keys address "ci-admin-${ts}")
+          echo "Admin: $ADMIN_ADDRESS"
+          
+          # Create .env file with generated, funded secrets
+          cat > .env <<EOF
+          DEPLOYER_SECRET=$DEPLOYER_SECRET
+          ADMIN_ADDRESS=$ADMIN_ADDRESS
+          ADMIN_SECRET=$ADMIN_SECRET
+          FEE_BPS=500
+          STELLAR_NETWORK=testnet
+          EOF
+          
+          echo "Test environment configured"
+          cat .env | grep -v SECRET
+
+      - name: Build contracts
+        run: |
+          export PATH="/root/.local/bin:$PATH"
+          stellar contract build
+
+      - name: Run smoke test
+        run: |
+          export PATH="/root/.local/bin:$PATH"
+          export STELLAR_NETWORK=testnet
+          
+          if [[ "${{ github.event.inputs.deploy_fresh }}" == "true" ]]; then
+            bash scripts/testnet-smoke-test.sh --deploy --keep-env
+          else
+            bash scripts/testnet-smoke-test.sh --keep-env
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-env
+          path: .env.testnet.smoke-test
+          retention-days: 7
+
+      - name: Report success
+        if: success()
+        run: |
+          echo "✓ Testnet smoke test passed"
+          echo "Full campaign lifecycle verified on testnet:"
+          echo "  - Campaign creation and funding"
+          echo "  - Creator applications and approvals"
+          echo "  - Proof submission and approval"
+          echo "  - Payment claims and releases"
+
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "✗ Testnet smoke test failed"
+          echo "Check logs above for details"
+          exit 1

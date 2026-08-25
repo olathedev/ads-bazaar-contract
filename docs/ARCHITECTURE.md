@@ -86,6 +86,59 @@ logic for the core flows is left as `todo!()`:
 Each `todo!()` has a doc comment directly above it describing the intended
 behavior and the open design questions it depends on — start there.
 
+## Testing strategy
+
+Testing is split into two layers, each with different goals:
+
+### Unit tests (fast, mock environment)
+
+Run via `cargo test --workspace`. These use `soroban_sdk::testutils::Env` — a
+mocked, in-process host environment that lets you verify contract logic
+quickly without network dependency.
+
+**Coverage:** `initialize`, read-only getters, error cases, state transitions
+for functions that are already implemented.
+
+**Limitation:** Unit tests don't exercise real network semantics — actual
+transaction submission, real Stellar Asset Contract behavior, ledger time
+progression, TTL/rent behavior, or the actual CLI that users will invoke.
+
+### End-to-end testnet smoke test (real network, pre-release verification)
+
+Run via `./scripts/testnet-smoke-test.sh` or trigger via GitHub Actions.
+
+This drives a complete campaign lifecycle against a **real testnet
+deployment**:
+
+- Funds testnet accounts via Friendbot
+- Orchestrates the full flow: `create_campaign` → `fund_campaign` →
+  `apply_to_campaign` → `approve_creator` → `submit_proof` →
+  `approve_submission` → `claim_payment`
+- Asserts on-chain state at each step, failing with clear errors if
+  anything goes wrong
+- Exercises the actual `stellar contract invoke` CLI that production users
+  will depend on
+
+**When to run:** Before a mainnet deployment (part of the pre-release
+checklist), or whenever you want to verify the real deployed artifact works
+end-to-end. Not intended to run on every CI push — it has testnet dependency,
+funded account setup, and network flakiness.
+
+**How to run:**
+
+```bash
+# Against existing testnet deployment (assumes contracts already deployed)
+./scripts/testnet-smoke-test.sh
+
+# Deploy fresh contracts first
+./scripts/testnet-smoke-test.sh --deploy
+
+# Manually trigger from GitHub Actions
+# Go to Actions → Testnet Smoke Test → Run workflow
+```
+
+See [`README.md`](../README.md#end-to-end-testnet-smoke-test) for full details.
+
 ## Open design questions for contributors
 
 1. **Proof-of-work verification** (`submit_proof`): off-chain URI only, an

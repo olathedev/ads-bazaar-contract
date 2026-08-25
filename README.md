@@ -246,6 +246,40 @@ stellar contract invoke --id "$ESCROW_ID" --source "$BUSINESS_SECRET" --network 
 | Testnet | _fill in after first `./deploy.sh` run_ | _fill in after first `./deploy.sh` run_ |
 | Mainnet | not yet deployed | not yet deployed |
 
+### End-to-end testnet smoke test
+
+Before a mainnet deployment, verify the full campaign lifecycle against a real testnet deployment:
+
+```bash
+# Run the smoke test against an existing testnet deployment
+./scripts/testnet-smoke-test.sh
+
+# Or deploy fresh contracts and run the smoke test
+./scripts/testnet-smoke-test.sh --deploy
+
+# Keep the test environment file for inspection
+./scripts/testnet-smoke-test.sh --keep-env
+```
+
+The smoke test:
+- Funds three testnet accounts via [Friendbot](https://developers.stellar.org/docs/tools/quickstart#fund-your-account)
+- Drives a complete campaign lifecycle: `create_campaign` → `fund_campaign` → `apply_to_campaign` (2 creators) → `approve_creator` (both) → `submit_proof` (both) → `approve_submission` (both) → `claim_payment` (both)
+- Asserts on-chain state at each step, failing loudly with clear errors if anything goes wrong
+- Exercises real network semantics: actual transaction submission, Stellar asset behavior, ledger time progression, and the actual `stellar contract invoke` CLI that users will rely on
+
+This is the verification step that exercises the real deployed artifact, not just the unit tests in `cargo test`.
+
+#### Manual testnet smoke test trigger
+
+Manually trigger the smoke test workflow from GitHub Actions:
+
+1. Go to **Actions** → **Testnet Smoke Test**
+2. Click **Run workflow**
+3. Optionally check **Deploy fresh contracts** to deploy new contracts before testing
+4. Wait for completion and check logs
+
+This is the recommended pre-release checklist item to confirm the testnet deployment works end-to-end.
+
 ---
 
 ## Testing

@@ -12,6 +12,7 @@
 //! USDC, etc. without per-asset special-casing.
 #![no_std]
 
+mod dispute;
 mod error;
 mod events;
 mod storage;
@@ -20,7 +21,9 @@ mod types;
 pub use error::Error;
 pub use types::{Application, Campaign, DisputeResolution, ProtocolConfig};
 
-use ads_bazaar_shared::{ApplicationStatus, CampaignId, CampaignStatus, PayoutAsset};
+use ads_bazaar_shared::{
+    ApplicationStatus, CampaignId, CampaignStatus, DisputeOutcome, PayoutAsset,
+};
 use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Symbol};
 
 /// Version string stored at `initialize` time. `upgrade` swaps the WASM
@@ -962,16 +965,22 @@ impl CampaignEscrowContract {
 
         let payout_amount = application.payout_amount;
         let fee_bps = campaign.fee_bps;
-        let (creator_gross, business_amount) = match resolution {
-            DisputeResolution::PayCreator => (payout_amount, 0),
-            DisputeResolution::RefundBusiness => (0, payout_amount),
+        let (creator_gross, business_amount, dispute_outcome) = match resolution {
+            DisputeResolution::PayCreator => (payout_amount, 0, DisputeOutcome::CreatorFavored),
+            DisputeResolution::RefundBusiness => {
+                (0, payout_amount, DisputeOutcome::BusinessFavored)
+            }
             DisputeResolution::Split(bps) => {
                 if !(0..=ads_bazaar_shared::BASIS_POINTS_DENOMINATOR).contains(&bps) {
                     return Err(Error::InvalidAmount);
                 }
                 let creator_gross = payout_amount.checked_mul(bps).ok_or(Error::InvalidAmount)?
                     / ads_bazaar_shared::BASIS_POINTS_DENOMINATOR;
-                (creator_gross, payout_amount - creator_gross)
+                (
+                    creator_gross,
+                    payout_amount - creator_gross,
+                    DisputeOutcome::Split(bps),
+                )
             }
         };
 
@@ -1018,9 +1027,26 @@ impl CampaignEscrowContract {
             token.transfer(&contract, &business, &business_amount);
         }
 
+        // Close out the dispute-resolution record if one was raised via
+        // raise_dispute. Uses try_close_dispute (the fallible wrapper) so a
+        // broken or unset dispute-resolution contract cannot brick this admin
+        // settlement path — state writes and token transfers are already
+        // committed above; the close-out is best-effort.
+        if let Ok(dispute_addr) = storage::get_dispute_contract(&env) {
+            let dispute_client =
+                dispute::DisputeResolutionClient::new(&env, &dispute_addr);
+            let _ = dispute_client.try_close_dispute(
+                &contract,
+                &campaign_id,
+                &creator,
+                &dispute_outcome,
+            );
+        }
+
         events::DisputeResolved {
             campaign_id,
             creator,
+            dispute_outcome,
             creator_amount: creator_net,
             business_amount,
         }

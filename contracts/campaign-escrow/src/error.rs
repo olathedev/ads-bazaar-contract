@@ -57,4 +57,7 @@ pub enum Error {
     /// there is no contested payout to settle and no evidence window to
     /// measure from.
     NoDisputeOpen = 27,
+    /// The provided payout asset refers to an address that is not a
+    /// responsive/valid SEP-41 token contract.
+    InvalidAsset = 28,
 }

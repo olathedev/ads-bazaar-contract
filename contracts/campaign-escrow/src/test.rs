@@ -234,6 +234,40 @@ mod test_happy_path {
     }
 
     #[test]
+    fn create_campaign_rejects_non_contract_token() {
+        let (env, contract_id) = setup_env();
+        let client = CampaignEscrowContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let dispute = Address::generate(&env);
+        let business = Address::generate(&env);
+        client.initialize(&admin, &dispute, &50);
+
+        // A random account address — not a deployed token contract.
+        // create_campaign must catch this via try_invoke_contract and return
+        // Error::InvalidAsset rather than aborting with a host trap.
+        let bogus_token = Address::generate(&env);
+        let asset = usdc(&env, &bogus_token);
+
+        let now = env.ledger().timestamp();
+        let result = client.try_create_campaign(
+            &business,
+            &asset,
+            &1_000,
+            &1,
+            &(now + 86_400),
+            &(now + 604_800),
+            &soroban_sdk::String::from_str(&env, "ipfs://brief"),
+        );
+
+        assert_eq!(
+            result,
+            Err(Ok(Error::InvalidAsset)),
+            "expected Error::InvalidAsset for a non-contract token address, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
     fn fee_calculation_50bps() {
         let (env, contract_id) = setup_env();
         let (client, admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);

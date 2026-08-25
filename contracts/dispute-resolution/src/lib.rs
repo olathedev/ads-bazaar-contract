@@ -178,6 +178,43 @@ impl DisputeResolutionContract {
         todo!("design + implement dispute resolution — see doc comment above")
     }
 
+    /// Close out the open dispute over a `(campaign_id, creator)` payout that
+    /// `campaign-escrow::resolve_dispute` just settled. Only the
+    /// `campaign-escrow` contract set at `initialize` may call this.
+    ///
+    /// Idempotent: if there is no open dispute record for that payout (the
+    /// freeze came from the admin's direct `freeze_for_dispute` path, or the
+    /// dispute was already closed) this is a no-op rather than an error.
+    pub fn close_dispute(
+        env: Env,
+        caller: Address,
+        campaign_id: CampaignId,
+        creator: Address,
+        outcome: DisputeOutcome,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != storage::get_escrow_contract(&env)? {
+            return Err(Error::Unauthorized);
+        }
+        if outcome == DisputeOutcome::Pending {
+            return Err(Error::InvalidStatus);
+        }
+
+        let Some(dispute_id) = storage::get_open_dispute(&env, campaign_id, &creator) else {
+            return Ok(());
+        };
+
+        let mut dispute = storage::get_dispute(&env, dispute_id)?;
+        dispute.status = DisputeStatus::Resolved;
+        dispute.outcome = outcome;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        storage::set_dispute(&env, dispute_id, &dispute);
+        storage::clear_open_dispute(&env, campaign_id, &creator);
+
+        events::DisputeResolved { dispute_id }.publish(&env);
+        Ok(())
+    }
+
     /// Read-only lookup of a dispute's current state.
     pub fn get_dispute(env: Env, dispute_id: DisputeId) -> Result<Dispute, Error> {
         storage::get_dispute(&env, dispute_id)

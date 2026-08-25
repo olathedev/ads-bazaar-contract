@@ -111,7 +111,8 @@ pub fn set_open_dispute(env: &Env, campaign_id: CampaignId, creator: &Address, i
 }
 
 /// Clear the open-dispute marker for a payout so a fresh dispute can be
-/// raised over it later. Called once `resolve_dispute` is implemented.
+/// raised over it later. Called by `close_dispute`, which the
+/// `campaign-escrow` admin bypass invokes after settling a payout.
 pub fn clear_open_dispute(env: &Env, campaign_id: CampaignId, creator: &Address) {
     env.storage()
         .persistent()

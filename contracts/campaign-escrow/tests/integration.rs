@@ -29,6 +29,7 @@
 //! | 14 | Raise in auto-approval window still blocks claim | PayoutFrozen |
 //! | 15 | Two creators on same campaign can have independent disputes | separate dispute ids |
 //! | 16 | raise → immediate admin resolve rejected | EvidenceWindowOpen; no funds moved |
+//! | 17 | raise → admin resolve closes dispute-resolution record | record `Resolved`, matching outcome |
 //!
 //! Note that tests 6–8 advance the ledger past `MIN_EVIDENCE_WINDOW` before
 //! resolving. That is the real flow, not test scaffolding: a dispute raised
@@ -611,4 +612,67 @@ fn admin_cannot_resolve_dispute_immediately_after_cross_contract_raise() {
         f.escrow().get_application(&campaign_id, &creator).status,
         ApplicationStatus::Paid
     );
+}
+
+// ── 17. Admin resolve after raise closes the dispute-resolution record ────────
+
+#[test]
+fn admin_resolve_after_cross_contract_raise_closes_dispute_record() {
+    let f = Fixture::setup();
+    let campaign_id = f.create_funded_campaign();
+    let creator = f.add_creator_with_proof(campaign_id);
+
+    let dispute_id = f.disputes().raise_dispute(
+        &creator,
+        &campaign_id,
+        &creator,
+        &String::from_str(&f.env, "ipfs://evidence"),
+    );
+    assert_eq!(
+        f.disputes().get_dispute(&dispute_id).status,
+        DisputeStatus::Raised
+    );
+
+    f.wait_out_evidence_window();
+    f.escrow().resolve_dispute(
+        &f.admin,
+        &campaign_id,
+        &creator,
+        &ads_bazaar_campaign_escrow::DisputeResolution::PayCreator,
+    );
+
+    let d = f.disputes().get_dispute(&dispute_id);
+    assert_eq!(d.status, DisputeStatus::Resolved);
+    assert_eq!(d.outcome, DisputeOutcome::CreatorFavored);
+    assert_eq!(d.resolved_at, Some(BASE_TIME + MIN_EVIDENCE_WINDOW));
+
+    let app = f.escrow().get_application(&campaign_id, &creator);
+    assert_eq!(app.status, ApplicationStatus::Paid);
+    assert!(!app.frozen);
+}
+
+#[test]
+fn admin_resolve_outcome_mapping_reaches_dispute_record() {
+    let f = Fixture::setup();
+    let campaign_id = f.create_funded_campaign();
+
+    let creator = f.add_creator_with_proof(campaign_id);
+    let dispute_id = f.disputes().raise_dispute(
+        &f.business,
+        &campaign_id,
+        &creator,
+        &String::from_str(&f.env, "ipfs://no-work"),
+    );
+    f.wait_out_evidence_window();
+
+    f.escrow().resolve_dispute(
+        &f.admin,
+        &campaign_id,
+        &creator,
+        &ads_bazaar_campaign_escrow::DisputeResolution::RefundBusiness,
+    );
+
+    let d = f.disputes().get_dispute(&dispute_id);
+    assert_eq!(d.status, DisputeStatus::Resolved);
+    assert_eq!(d.outcome, DisputeOutcome::BusinessFavored);
 }

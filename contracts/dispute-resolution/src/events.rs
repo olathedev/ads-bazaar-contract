@@ -1,7 +1,9 @@
 //! Event definitions for the dispute-resolution contract. See the
 //! campaign-escrow crate's `events.rs` for more detail on the
-//! `#[contractevent]` pattern used here. None of these are published yet —
-//! wire up `.publish(&env)` calls as each `todo!()` handler is implemented.
+//! `#[contractevent]` pattern used here. `DisputeResolved` is published by
+//! `close_dispute` (the escrow-side admin bypass closing out a raised
+//! dispute); the arbiter-resolved `resolve_dispute` will publish it too once
+//! that `todo!()` is implemented.
 #![allow(dead_code)]
 
 use ads_bazaar_shared::DisputeId;

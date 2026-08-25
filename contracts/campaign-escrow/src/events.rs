@@ -7,7 +7,7 @@
 //! matching point in `lib.rs` as each `todo!()` handler is implemented.
 #![allow(dead_code)]
 
-use ads_bazaar_shared::CampaignId;
+use ads_bazaar_shared::{CampaignId, DisputeOutcome};
 use soroban_sdk::{contractevent, Address, BytesN, String};
 
 #[contractevent]
@@ -174,6 +174,7 @@ pub struct DisputeResolved {
     pub campaign_id: CampaignId,
     #[topic]
     pub creator: Address,
+    pub dispute_outcome: DisputeOutcome,
     pub creator_amount: i128,
     pub business_amount: i128,
 }

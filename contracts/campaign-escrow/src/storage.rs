@@ -37,8 +37,16 @@ pub enum DataKey {
     Paused,
     /// Count of creators that have applied to a campaign. Used by
     /// `update_campaign_metadata` to enforce that the brief is locked once
-    /// any creator has applied.
+    /// any creator has applied, and as the upper bound when paging through
+    /// `CampaignApplicant`.
     ApplicantCount(CampaignId),
+    /// The applicant at a given zero-based ordinal within a campaign, in the
+    /// order they applied. One fixed-size entry per applicant rather than a
+    /// single growing `Vec<Address>`: that keeps the write cost of
+    /// `apply_to_campaign` constant no matter how many creators applied
+    /// before, which is what #43 was about. Read back in pages by
+    /// `campaign_applicants`.
+    CampaignApplicant(CampaignId, u32),
 }
 
 pub fn is_initialized(env: &Env) -> bool {
@@ -188,19 +196,59 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
-/// Increment the applicant count for `campaign_id`. Called from
-/// `apply_to_campaign` so `update_campaign_metadata` can lock the brief
-/// once at least one creator has applied. O(1) regardless of how many
-/// creators have applied, unlike an ever-growing list of applicants.
-pub fn add_campaign_applicant(env: &Env, campaign_id: CampaignId, _creator: &Address) {
-    let key = DataKey::ApplicantCount(campaign_id);
-    let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-    env.storage().persistent().set(&key, &(count + 1));
+/// Record `creator` as the next applicant on `campaign_id`: append them at
+/// the current count's ordinal, then increment the count.
+///
+/// Both writes are fixed-size — one `Address` under a fresh
+/// `CampaignApplicant` key, one `u32` under `ApplicantCount` — so the cost
+/// of applying does not grow with the number of prior applicants. That
+/// property is the point of #43, and
+/// `applying_with_many_prior_applicants_does_not_regress_write_cost` asserts
+/// it exactly.
+pub fn add_campaign_applicant(env: &Env, campaign_id: CampaignId, creator: &Address) {
+    let count_key = DataKey::ApplicantCount(campaign_id);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+    let applicant_key = DataKey::CampaignApplicant(campaign_id, count);
+    env.storage().persistent().set(&applicant_key, creator);
     env.storage().persistent().extend_ttl(
-        &key,
+        &applicant_key,
         PERSISTENT_LIFETIME_THRESHOLD,
         PERSISTENT_BUMP_LEDGERS,
     );
+
+    env.storage().persistent().set(&count_key, &(count + 1));
+    env.storage().persistent().extend_ttl(
+        &count_key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_LEDGERS,
+    );
+}
+
+/// Number of creators that have applied to `campaign_id`. Zero if the
+/// campaign has no applicants (or does not exist — callers that care about
+/// the difference check the campaign first).
+pub fn get_applicant_count(env: &Env, campaign_id: CampaignId) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ApplicantCount(campaign_id))
+        .unwrap_or(0)
+}
+
+/// The applicant at `index`, bumping its TTL so that paging through an
+/// index keeps it alive — the entries are written once at apply time and
+/// never rewritten, so reads are the only thing that can refresh them.
+pub fn get_campaign_applicant(env: &Env, campaign_id: CampaignId, index: u32) -> Option<Address> {
+    let key = DataKey::CampaignApplicant(campaign_id, index);
+    let applicant: Option<Address> = env.storage().persistent().get(&key);
+    if applicant.is_some() {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
+    }
+    applicant
 }
 
 /// Return whether any creator has applied to `campaign_id`.

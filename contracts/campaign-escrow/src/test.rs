@@ -2300,3 +2300,142 @@ mod test_freeze_for_dispute {
         assert_eq!(result, Err(Ok(Error::SubmissionNotPayable)));
     }
 }
+
+/// Enumerating a campaign's applicants (#8). The index is one fixed-size
+/// entry per applicant keyed by ordinal, so it answers "who applied" without
+/// reintroducing the unbounded per-apply write cost #43 removed — see
+/// `applying_with_many_prior_applicants_does_not_regress_write_cost`, which
+/// still holds with the index in place.
+mod test_campaign_applicants {
+    use super::test_helpers::*;
+    use crate::{Error, MAX_APPLICANTS_PAGE};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Address, String, Vec};
+
+    /// Apply `n` freshly generated creators to `campaign_id`, returning them
+    /// in application order.
+    fn apply_n(
+        env: &soroban_sdk::Env,
+        client: &crate::CampaignEscrowContractClient,
+        campaign_id: u64,
+        n: u32,
+    ) -> Vec<Address> {
+        let mut creators = Vec::new(env);
+        for _ in 0..n {
+            let creator = Address::generate(env);
+            client.apply_to_campaign(&creator, &campaign_id, &String::from_str(env, "pitch"));
+            creators.push_back(creator);
+        }
+        creators
+    }
+
+    #[test]
+    fn three_creators_apply_and_are_returned_in_order() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+
+        let expected = apply_n(&env, &client, id, 3);
+
+        assert_eq!(client.applicant_count(&id), 3);
+        assert_eq!(client.campaign_applicants(&id, &0, &10), expected);
+    }
+
+    #[test]
+    fn applicants_page_across_multiple_calls_without_gaps_or_repeats() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+
+        let expected = apply_n(&env, &client, id, 7);
+
+        // Walk the index in pages of 3 the way a paginating client would.
+        let mut seen = Vec::new(&env);
+        let mut start = 0u32;
+        loop {
+            let page = client.campaign_applicants(&id, &start, &3);
+            if page.is_empty() {
+                break;
+            }
+            start += page.len();
+            for applicant in page.iter() {
+                seen.push_back(applicant);
+            }
+        }
+
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn start_at_or_past_end_returns_empty_rather_than_erroring() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+        apply_n(&env, &client, id, 2);
+
+        assert!(client.campaign_applicants(&id, &2, &10).is_empty());
+        assert!(client.campaign_applicants(&id, &99, &10).is_empty());
+    }
+
+    #[test]
+    fn campaign_with_no_applicants_returns_empty_and_zero_count() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+
+        assert_eq!(client.applicant_count(&id), 0);
+        assert!(client.campaign_applicants(&id, &0, &10).is_empty());
+    }
+
+    #[test]
+    fn limit_is_capped_at_max_page() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+
+        let n = MAX_APPLICANTS_PAGE + 20;
+        apply_n(&env, &client, id, n);
+        assert_eq!(client.applicant_count(&id), n);
+
+        // An over-large limit is clamped, not honoured.
+        let page = client.campaign_applicants(&id, &0, &u32::MAX);
+        assert_eq!(page.len(), MAX_APPLICANTS_PAGE);
+
+        // The remainder is still reachable from the next offset.
+        let rest = client.campaign_applicants(&id, &MAX_APPLICANTS_PAGE, &u32::MAX);
+        assert_eq!(rest.len(), 20);
+    }
+
+    #[test]
+    fn unknown_campaign_is_distinguishable_from_no_applicants() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, _business, _token) = bootstrap(&env, &contract_id, 50);
+
+        assert_eq!(
+            client.try_applicant_count(&999),
+            Err(Ok(Error::CampaignNotFound))
+        );
+        assert_eq!(
+            client.try_campaign_applicants(&999, &0, &10),
+            Err(Ok(Error::CampaignNotFound))
+        );
+    }
+
+    #[test]
+    fn rejected_double_application_is_not_indexed_twice() {
+        let (env, contract_id) = setup_env();
+        let (client, _admin, _dispute, business, token) = bootstrap(&env, &contract_id, 50);
+        let id = create_funded_campaign(&env, &client, &business, &token, 10_000_000, 5);
+
+        let creator = Address::generate(&env);
+        client.apply_to_campaign(&creator, &id, &String::from_str(&env, "pitch"));
+        let result = client.try_apply_to_campaign(&creator, &id, &String::from_str(&env, "pitch2"));
+        assert_eq!(result, Err(Ok(Error::AlreadyApplied)));
+
+        // The rejected retry must not leave a duplicate ordinal behind.
+        assert_eq!(client.applicant_count(&id), 1);
+        let applicants = client.campaign_applicants(&id, &0, &10);
+        assert_eq!(applicants.len(), 1);
+        assert_eq!(applicants.get(0).unwrap(), creator);
+    }
+}

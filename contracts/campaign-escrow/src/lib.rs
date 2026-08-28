@@ -24,7 +24,7 @@ pub use types::{Application, Campaign, DisputeResolution, ProtocolConfig};
 use ads_bazaar_shared::{
     ApplicationStatus, CampaignId, CampaignStatus, DisputeOutcome, PayoutAsset,
 };
-use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Symbol};
+use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Symbol, Vec};
 
 /// Version string stored at `initialize` time. `upgrade` swaps the WASM
 /// binary but does not bump this on its own — see the TODO on `upgrade`
@@ -38,6 +38,18 @@ const INITIAL_VERSION: &str = "0.1.0";
 /// campaign that has been abandoned, never as a shortcut around
 /// `expire_campaign`.
 const EMERGENCY_RECOVERY_GRACE_PERIOD: u64 = 180 * 24 * 60 * 60; // ~6 months
+
+/// Largest page `campaign_applicants` will return in one call.
+///
+/// The index stores one ledger entry per applicant, so a page of N costs N
+/// entries of footprint plus the campaign, the count, and the contract
+/// instance. That runs into Soroban's 100-entry footprint limit sooner than
+/// it looks: a 100-wide page measured at 103 entries and failed outright
+/// with `total footprint ledger entries: 103 > 100`. 50 leaves comfortable
+/// headroom while still halving the round-trips of a smaller page.
+///
+/// Callers page with `start` until they have `applicant_count` entries.
+pub const MAX_APPLICANTS_PAGE: u32 = 50;
 
 /// Minimum time that must elapse between a dispute being opened over an
 /// application (`freeze_for_dispute`, which emits `events::DisputeFrozen`)
@@ -1103,6 +1115,49 @@ impl CampaignEscrowContract {
         creator: Address,
     ) -> Result<Application, Error> {
         storage::get_application(&env, campaign_id, &creator)
+    }
+
+    /// Number of creators that have applied to `campaign_id`, for paging
+    /// through `campaign_applicants`. Errors if the campaign does not
+    /// exist, so a caller can tell "no applicants yet" from "no such
+    /// campaign" — a bare count cannot.
+    pub fn applicant_count(env: Env, campaign_id: CampaignId) -> Result<u32, Error> {
+        storage::get_campaign(&env, campaign_id)?;
+        Ok(storage::get_applicant_count(&env, campaign_id))
+    }
+
+    /// One page of a campaign's applicants, in the order they applied.
+    ///
+    /// Returns up to `limit` addresses starting at ordinal `start`, capped
+    /// at `MAX_APPLICANTS_PAGE`; a `start` at or past the end returns an
+    /// empty vec rather than erroring, so a caller can page until it gets a
+    /// short read. Pair with `applicant_count` to size the walk, and with
+    /// `get_application` to read each applicant's status — the index is
+    /// deliberately status-agnostic, so filtering stays a client concern and
+    /// this function's cost does not depend on how applications are doing.
+    pub fn campaign_applicants(
+        env: Env,
+        campaign_id: CampaignId,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<Address>, Error> {
+        storage::get_campaign(&env, campaign_id)?;
+
+        let count = storage::get_applicant_count(&env, campaign_id);
+        let mut applicants = Vec::new(&env);
+        if start >= count {
+            return Ok(applicants);
+        }
+
+        let page = limit.min(MAX_APPLICANTS_PAGE);
+        // `start < count` above, so this cannot underflow.
+        let end = start.saturating_add(page).min(count);
+        for index in start..end {
+            if let Some(applicant) = storage::get_campaign_applicant(&env, campaign_id, index) {
+                applicants.push_back(applicant);
+            }
+        }
+        Ok(applicants)
     }
 
     /// Read-only lookup of protocol-level config (admin, treasury, fee_bps)

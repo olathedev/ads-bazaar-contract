@@ -1800,7 +1800,10 @@ mod test_resolve_dispute {
         client.expire_campaign(&business, &id);
 
         let campaign = client.get_campaign(&id);
-        assert_eq!(campaign.status, ads_bazaar_shared::CampaignStatus::Cancelled);
+        assert_eq!(
+            campaign.status,
+            ads_bazaar_shared::CampaignStatus::Cancelled
+        );
 
         // Payout is stuck. We can freeze and resolve it.
         open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);
@@ -1826,7 +1829,10 @@ mod test_resolve_dispute {
         client.cancel_campaign(&business, &id);
 
         let campaign = client.get_campaign(&id);
-        assert_eq!(campaign.status, ads_bazaar_shared::CampaignStatus::Cancelled);
+        assert_eq!(
+            campaign.status,
+            ads_bazaar_shared::CampaignStatus::Cancelled
+        );
 
         // Payout is stuck. We can freeze and resolve it.
         open_dispute_and_wait_out_window(&env, &client, &dispute, id, &creator);

@@ -268,11 +268,8 @@ impl CampaignEscrowContract {
         // clear error instead of silently deferring failure to fund_campaign
         // after creators have already applied and done work.
         let decimals_sym = Symbol::new(&env, "decimals");
-        let probe_result = env.try_invoke_contract::<u32, Error>(
-            &asset.token,
-            &decimals_sym,
-            vec![&env],
-        );
+        let probe_result =
+            env.try_invoke_contract::<u32, Error>(&asset.token, &decimals_sym, vec![&env]);
         if probe_result.is_err() {
             return Err(Error::InvalidAsset);
         }
@@ -1033,8 +1030,7 @@ impl CampaignEscrowContract {
         // settlement path — state writes and token transfers are already
         // committed above; the close-out is best-effort.
         if let Ok(dispute_addr) = storage::get_dispute_contract(&env) {
-            let dispute_client =
-                dispute::DisputeResolutionClient::new(&env, &dispute_addr);
+            let dispute_client = dispute::DisputeResolutionClient::new(&env, &dispute_addr);
             let _ = dispute_client.try_close_dispute(
                 &contract,
                 &campaign_id,

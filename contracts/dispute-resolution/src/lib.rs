@@ -56,6 +56,7 @@ impl DisputeResolutionContract {
         storage::set_admin(&env, &admin);
         storage::set_escrow_contract(&env, &escrow_contract);
         storage::set_version(&env, &String::from_str(&env, INITIAL_VERSION));
+        storage::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -123,6 +124,7 @@ impl DisputeResolutionContract {
             },
         );
         storage::set_open_dispute(&env, campaign_id, &creator, dispute_id);
+        storage::extend_instance_ttl(&env);
 
         events::DisputeRaised {
             dispute_id,
@@ -153,6 +155,7 @@ impl DisputeResolutionContract {
         dispute.arbiter = Some(arbiter.clone());
         dispute.status = DisputeStatus::UnderReview;
         storage::set_dispute(&env, dispute_id, &dispute);
+        storage::extend_instance_ttl(&env);
 
         events::ArbiterAssigned {
             dispute_id,
@@ -175,6 +178,7 @@ impl DisputeResolutionContract {
         outcome: DisputeOutcome,
     ) -> Result<(), Error> {
         arbiter.require_auth();
+        storage::extend_instance_ttl(&env);
         todo!("design + implement dispute resolution — see doc comment above")
     }
 
@@ -201,6 +205,7 @@ impl DisputeResolutionContract {
         }
 
         let Some(dispute_id) = storage::get_open_dispute(&env, campaign_id, &creator) else {
+            storage::extend_instance_ttl(&env);
             return Ok(());
         };
 
@@ -210,6 +215,7 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         storage::set_dispute(&env, dispute_id, &dispute);
         storage::clear_open_dispute(&env, campaign_id, &creator);
+        storage::extend_instance_ttl(&env);
 
         events::DisputeResolved { dispute_id }.publish(&env);
         Ok(())
@@ -217,12 +223,16 @@ impl DisputeResolutionContract {
 
     /// Read-only lookup of a dispute's current state.
     pub fn get_dispute(env: Env, dispute_id: DisputeId) -> Result<Dispute, Error> {
-        storage::get_dispute(&env, dispute_id)
+        let dispute = storage::get_dispute(&env, dispute_id)?;
+        storage::extend_instance_ttl(&env);
+        Ok(dispute)
     }
 
     /// Read-only lookup of the WASM version string set at `initialize`.
     pub fn version(env: Env) -> Result<String, Error> {
-        storage::get_version(&env)
+        let version = storage::get_version(&env)?;
+        storage::extend_instance_ttl(&env);
+        Ok(version)
     }
 
     /// Replace this contract's WASM binary in place via Soroban's native
@@ -235,6 +245,7 @@ impl DisputeResolutionContract {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         require_admin(&env, &admin)?;
 
+        storage::extend_instance_ttl(&env);
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         events::ContractUpgraded { new_wasm_hash }.publish(&env);

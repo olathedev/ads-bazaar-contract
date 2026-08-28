@@ -639,3 +639,69 @@ mod test_close_dispute {
         );
     }
 }
+
+/// Instance storage (`Admin`, `EscrowContract`, `Version`, `NextDisputeId`)
+/// is written once at `initialize` and never again, so without an explicit
+/// bump it decays until the ledger archives it — at which point
+/// `get_escrow_contract` starts failing with `NotInitialized` and
+/// `raise_dispute` is bricked until someone submits a `RestoreFootprint`.
+mod test_instance_ttl {
+    use super::test_helpers::*;
+    use crate::storage::{INSTANCE_BUMP_LEDGERS, INSTANCE_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Instance as _;
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::{Address, Env, String};
+
+    /// Ledgers to burn through before the instance entry drops under the
+    /// extend threshold and a bump actually takes effect.
+    const LEDGERS_TO_DECAY: u32 = INSTANCE_BUMP_LEDGERS - INSTANCE_LIFETIME_THRESHOLD + 1;
+
+    fn instance_ttl(env: &Env, dispute_id: &Address) -> u32 {
+        env.as_contract(dispute_id, || env.storage().instance().get_ttl())
+    }
+
+    #[test]
+    fn initialize_extends_instance_ttl() {
+        let (env, escrow_id, dispute_id) = setup_env();
+        bootstrap(&env, &escrow_id, &dispute_id);
+
+        assert_eq!(instance_ttl(&env, &dispute_id), INSTANCE_BUMP_LEDGERS);
+    }
+
+    #[test]
+    fn raise_dispute_re_extends_decayed_instance_ttl() {
+        let (env, escrow_id, dispute_id) = setup_env();
+        let f = bootstrap(&env, &escrow_id, &dispute_id);
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += LEDGERS_TO_DECAY);
+        let decayed = instance_ttl(&env, &dispute_id);
+        assert!(
+            decayed <= INSTANCE_LIFETIME_THRESHOLD,
+            "precondition: TTL must be under the threshold for a bump to fire, was {decayed}"
+        );
+
+        f.disputes.raise_dispute(
+            &f.creator,
+            &f.campaign_id,
+            &f.creator,
+            &String::from_str(&env, "ipfs://evidence"),
+        );
+
+        assert_eq!(instance_ttl(&env, &dispute_id), INSTANCE_BUMP_LEDGERS);
+    }
+
+    #[test]
+    fn read_only_version_call_extends_instance_ttl() {
+        let (env, escrow_id, dispute_id) = setup_env();
+        let f = bootstrap(&env, &escrow_id, &dispute_id);
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += LEDGERS_TO_DECAY);
+        assert!(instance_ttl(&env, &dispute_id) <= INSTANCE_LIFETIME_THRESHOLD);
+
+        f.disputes.version();
+
+        assert_eq!(instance_ttl(&env, &dispute_id), INSTANCE_BUMP_LEDGERS);
+    }
+}

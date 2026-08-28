@@ -9,6 +9,14 @@ use crate::types::Dispute;
 const PERSISTENT_BUMP_LEDGERS: u32 = 518_400;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 500_000;
 
+/// Same ~30-day-at-5s/ledger bump as `PERSISTENT_BUMP_LEDGERS`, but for
+/// instance storage (the `Admin`/`EscrowContract`/`Version`/`NextDisputeId`
+/// config keys). Kept as a separate constant since instance and persistent
+/// TTL are tracked independently by the ledger even when the numbers happen
+/// to match. Mirrors `campaign-escrow`'s pair of the same name.
+pub(crate) const INSTANCE_BUMP_LEDGERS: u32 = 518_400;
+pub(crate) const INSTANCE_LIFETIME_THRESHOLD: u32 = 500_000;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -24,6 +32,18 @@ pub enum DataKey {
 
 pub fn is_initialized(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Admin)
+}
+
+/// Bump the instance entry's TTL. Every public entry point in `lib.rs` calls
+/// this, reads included: nothing else writes to instance storage after
+/// `initialize`, so without a bump on the read paths the config keys would
+/// run out their TTL and get archived, and `get_admin`/`get_escrow_contract`
+/// would start failing with `Error::NotInitialized` until someone submits a
+/// `RestoreFootprint` operation.
+pub fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_LEDGERS);
 }
 
 pub fn set_admin(env: &Env, admin: &Address) {
